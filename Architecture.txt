@@ -1,0 +1,57 @@
+1. Quadcopter.py
+    It implements the dynamic model of a quadcopter in 3D space and 6dof.
+2. Animation.py
+    It implements a matplotlib 3d animation where the drones are animated with their positions and orientations.
+    It has focused subplots that show area around the drones.
+    It has a main plot that shows the moving window with all the drones in the enviroment.
+3. Controller
+    It contains implementations of various controller used to control the trajectory of a quadcopter.
+    1. Controller/PositionController.py
+    1. Controller/AttitudeController.py
+        It implements an attitude controller based on quaternion orientation of the quadcopter.
+    2. Controller/RateController.py
+        It implements a rate controller that uses the output of AttitudeController to give the torques in body frame.
+    3. Controller/ControlAllocator.py
+        It uses the thrust and torque commands to get motor commands.
+4. Environment.py
+    It reads the enviroment json file to give information like the number of quadcopters, their properties, air drag properties.
+5. DataLogger.py
+    It logs the data from quadcopters.
+6. Simulations
+    This is where different scenarios are simulated.
+    1. LiftedTrajectories
+        It is a simulation that uses 2 drones in an open environment to simulate a pursuit game where both pursuer and evader drones try to optimize their strategies.
+        1. Simulations/LiftedTrajectories/OptimizationSolver.py
+            The file is the implementation of a nonlinear optimization problem solver that is used to solve for a time optimal solution to the pursuit game for both evader and pursuer.
+        2. Simulations/LiftedTrajectories/NeuralNetwork.py
+            It is the implementation of a MLP that is used to obtain a reference trajectory for a given states of pursuer and evader's position and velocity.
+        3. Simulations/LiftedTrajectories/TrajectoryOptimizer.py
+            It uses the reference trajectory of neural network's inference to generate trajectories that can be followed by the quadcopter.
+    2. Pursuit guidance
+        It is a simulation that uses 2 drones in an open enviroment to simulate a pursuit game where the pursuer uses traditional guidance strategies like pure pursuit and parallel navigation.
+
+Project_Root
+├── Quadcopter.py           # 6DOF Rigid Body Dynamics
+├── Environment.py          # Config parsing (JSON)
+├── DataLogger.py           # State history CSV/HDF5 writer
+├── Animation.py            # Matplotlib 3D rendering
+│
+├── Controller/
+│   ├── __init__.py
+│   ├── PositionController.py  # NEW: Maps XYZ trajectories to desired Euler/Quaternions
+│   ├── AttitudeController.py  # Maps Quaternions to desired body rates
+│   ├── RateController.py      # Maps body rates to moments (Torques)
+│   └── ControlAllocator.py    # Maps Thrust + Torques to individual motor mixing
+│
+├── Guidance/                  # NEW: Dedicated directory for guidance strategies
+│   ├── __init__.py
+│   ├── Traditional.py         # Pure Pursuit / Proportional Navigation laws
+│   └── LearningBased.py       # Optimization & Neural Network wrappers
+│
+└── Simulations/
+    ├── run_pursuit_guidance.py  # Main execution script for Phase 1
+    └── run_lifted_trajectories.py # Main execution script for Phase 2
+
+[ Hours 0-4 ]  --->  [ Hours 4-8 ]  --->  [ Hours 8-12 ]  --->  [ Hours 12-24 ]
+ Physics & Config     Basic Cascaded      3D Matplotlib        Advanced Guidance
+ (Quadcopter/Env)       Controllers        Animation           & Lifted Opt/NN

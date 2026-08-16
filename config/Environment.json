@@ -1,0 +1,49 @@
+{
+  "simulation": {
+    "time_step": 0.002
+  },
+  "atmosphere": {
+    "air_density": 1.225,
+    "drag_coefficients": {
+      "translational": [
+        0.1,
+        0.1,
+        0.15
+      ],
+      "rotational": [
+        0.01,
+        0.01,
+        0.01
+      ]
+    },
+    "wind_turbulence": {
+      "model": "none",
+      "W20_turbulence": 10
+    }
+  },
+  "gravity": [
+    0,
+    0,
+    9.81
+  ],
+  "aerodynamics": {
+    "_comment": "NEW -- used only by src/models/deltav (the winged interceptor). Ignored by the old flat quadcopter model above, whose drag_coefficients/wind_turbulence stay exactly as-is. Real XFLR5 sweep populated: alpha -23.25 to 24.0 deg, V=50 m/s, single beta=0 sweep, no elevon-deflection variation.",
+    "source": "lookup_table",
+    "polar_table_path": "config/aero/wing_polar_xflr5.txt",
+    "reference_area_m2": 0.156,
+    "reference_chord_m": 0.291,
+    "reference_span_m": 0.6,
+    "columns": {
+      "alpha_deg": "alpha",
+      "CL": "CL",
+      "CD": "CD",
+      "CM": "Cm"
+    },
+    "alpha_range_deg": [
+      -180,
+      180
+    ],
+    "interpolation": "linear",
+    "extrapolation": "clamp"
+  }
+}
