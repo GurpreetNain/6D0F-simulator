@@ -1,231 +1,152 @@
-"""
-6-DOF nonlinear rigid-body model of the winged quad-tiltrotor
-interceptor. Implements x_dot = f(x, u) exactly as assembled in
-Full_6DOF_RigidBody_Derivation.pdf Ch 13, using the 12-STATE, direct-
-rotor-speed-input formulation of 6DOF.pdf / Interceptor_Input_State_
-Dependency_Map.pdf (no rotor motor-lag state -- that is Doc4's separate
-13-state variant, not used here per your selection).
-
-State  x  (12,): [xe, ye, h, u, v, w, phi, theta, psi, p, q, r]
-Input  u  (10,): [delta1, delta2, lam1, lam2, lam3, lam4, n1, n2, n3, n4]
-    delta1, delta2 : elevon deflections, rad (left, right)
-    lam1..4        : rotor tilt, rad (0 = hover/up, pi/2 = cruise/fwd)
-    n1..4          : rotor speed, rev/s
-
-Still-air assumption (6DOF.pdf Sec 3, item 3): "no wind/gust in this
-version (relative velocity = body velocity)". Wind is therefore NOT
-wired in here, unlike the previous Quadcopter.py's Environment coupling.
-If you want gusts, feed a wind vector into airdata()/u,v,w before
-calling _dynamics -- that is a model extension beyond the source docs,
-not part of the validated equations, and should be flagged as such in
-any published results.
-
---------------------------------------------------------------------
-Interface note (why this isn't a numeric drop-in for the old file)
---------------------------------------------------------------------
-The method names get_state_vector() / set_control_vector() /
-state_update(dt) are kept identical to the previous Quadcopter.py so
-the rest of your pipeline (loggers, GUI, etc.) needs minimal rewiring.
-But the STATE is now 12 Euler-angle elements (not 13 quaternion
-elements) and the CONTROL is now 10 raw elevon/tilt/rpm elements (not
-4 [thrust, tx, ty, tz]) -- this is unavoidable: the old model's
-[thrust,3 torques] abstraction has no way to represent tilt angle or
-elevon deflection, and the new vehicle's forces genuinely depend on
-those. Any controller/allocator that fed the old 4-element control
-vector must be replaced by one that outputs delta1, delta2, lam(1:4),
-n(1:4) directly, or by a trim/allocation layer built on
-Full_6DOF_RigidBody_Derivation.pdf Ch 14.
-"""
 import numpy as np
-
-from .params import InterceptorParams
-from . import rotors, lifting_body, elevons, gravity
-
+from src.common.utils import quat2rot
+from src.models.Environment import Environment
 
 class Quadcopter:
-    STATE_NAMES = ["xe", "ye", "h", "u", "v", "w",
-                   "phi", "theta", "psi", "p", "q", "r"]
-    INPUT_NAMES = ["delta1", "delta2",
-                   "lam1", "lam2", "lam3", "lam4",
-                   "n1", "n2", "n3", "n4"]
-
-    def __init__(self, params: InterceptorParams = None, id=1):
+    def __init__(self, mass, J, Lx, Ly, id):
         self._id = id
-        self.p = params if params is not None else InterceptorParams()
-        self._state_vector = np.zeros(12)
-        self._control_vector = np.zeros(10)   # [d1, d2, lam1..4, n1..4]
+        self._mass = mass
+        self._J = J
+        self._Lx = Lx
+        self._Ly = Ly
+        '''
+        _state_vector[0:3] = global_position
+        _state_vector[3:6] = local_linear_velocity
+        _state_vector[6:10] = quaternion_attitude
+        _state_vector[10:13] = local_angular_velocity
+        '''
+        self._state_vector = np.zeros(13)
+        self._state_vector[6] = 1
+        '''
+        _control_vector = [thrust, roll_torque, pitch_torque, yaw_torque]
+        '''
+        self._control_vector = np.zeros(4)
+        self._env = Environment(wingspan_meters=Ly, seed=id)
 
-    # ---- kept-identical interface -----------------------------------------
+    def _calculate_dynamics(self, state_vector, wind_speed, wind_rot):
+        global_position = state_vector[0:3]
+        local_linear_velocity = state_vector[3:6]
+        quaternion_attitude = state_vector[6:10]
+        local_angular_velocity = state_vector[10:13]
+        wx = local_angular_velocity[0]
+        wy = local_angular_velocity[1]
+        wz = local_angular_velocity[2]
+
+        h_meters = max(-global_position[2], 0.1)  # Assuming standard NED where Z is down/negative altitude
+        V_mps = np.linalg.norm(local_linear_velocity)
+        W20_kts = self._env.W20_knots
+
+        # Pull the vectors directly (they are already in the vehicle's local axis system)
+        # wind_speed_vector = self._env.get_wind_speed_vector()
+        # wind_rotation_vector = self._env.get_wind_rotation_vector()
+        wind_speed_vector = wind_speed
+        wind_rotation_vector = wind_rot
+
+        # Compute relative velocities straight away
+        v_airspeed_body = local_linear_velocity - wind_speed_vector
+        w_airRotation_body = local_angular_velocity - wind_rotation_vector
+        translational_drag_coeff = self._env.translational_drag_coeff
+        rotational_drag_coeff = self._env.rotational_drag_coeff
+
+        F_drag_body = np.array([
+            -0.5 * self._env.air_density * translational_drag_coeff[0] * v_airspeed_body[0] * abs(v_airspeed_body[0]),
+            -0.5 * self._env.air_density * translational_drag_coeff[1] * v_airspeed_body[1] * abs(v_airspeed_body[1]),
+            -0.5 * self._env.air_density * translational_drag_coeff[2] * v_airspeed_body[2] * abs(v_airspeed_body[2])
+        ])
+
+        Torque_drag = np.array([
+            -0.5 * self._env.air_density * rotational_drag_coeff[0] * w_airRotation_body[0] * abs(w_airRotation_body[0]),
+            -0.5 * self._env.air_density * rotational_drag_coeff[1] * w_airRotation_body[1] * abs(w_airRotation_body[1]),
+            -0.5 * self._env.air_density * rotational_drag_coeff[2] * w_airRotation_body[2] * abs(w_airRotation_body[2])
+        ])
+
+        state_derivate          = np.zeros(13)
+        # FIX: quat2rot is Body -> Global.
+        # Global Velocity = Body_to_Global @ Body_Velocity
+        state_derivate[0:3] = quat2rot(quaternion_attitude) @ local_linear_velocity
+
+        # FIX: Gravity in Body = Global_to_Body @ Global_Gravity
+        # Global_to_Body is the transpose of Body_to_Global
+        gravity_body = np.transpose(quat2rot(quaternion_attitude)) @ (self._mass * np.array(self._env.g))
+
+        state_derivate[3:6] = (1 / self._mass) * (np.array([0, 0, -self._control_vector[0]]) +
+                                                  gravity_body -
+                                                  self._mass * np.cross(local_angular_velocity, local_linear_velocity) +
+                                                  F_drag_body)
+        if (state_vector[2] >= 0.0) and (state_derivate[2] > 0.0):
+            state_derivate[2] = 0.0
+            # Also kill local linear velocity values along the normal axis to halt physical movement down through the plane
+            local_linear_velocity[2] = 0.0
+            state_derivate[5] = 0.0
+        # FIX: Corrected Omega matrix to be perfectly skew-symmetric
+        Omega = np.array([[  0, -wx, -wy, -wz],
+                        [ wx,   0,  wz, -wy],
+                        [ wy, -wz,   0,  wx],  # Changed -wy to wy
+                        [ wz,  wy, -wx,   0]])
+
+        state_derivate[6:10] = 0.5 * (Omega @ quaternion_attitude)
+        state_derivate[10:13]   = np.linalg.inv(self._J) @ (self._control_vector[1:] -
+                                                            np.cross(local_angular_velocity, self._J @ local_angular_velocity) +
+                                                            Torque_drag)
+        return state_derivate
+
+    def state_update(self, dt):
+        # 1. Lock down the noise realization vector for this step frame
+        self._env.sample_noise(dt)
+
+        # --- STEP 1: Baseline Horizon (t = 0) ---
+        # Store the true, clean baseline filter memory before any sub-stepping mutations
+        X_env_baseline = self._env._X.copy()
+
+        wind_speed_0 = self._env.get_wind_speed_vector()
+        wind_rot_0 = self._env.get_wind_rotation_vector()
+        k1 = self._calculate_dynamics(self._state_vector, wind_speed_0, wind_rot_0)
+
+        # --- STEP 2: First Midpoint Pass (t = +dt/2) ---
+        pos_mid1 = self._state_vector[0:3] + k1[0:3] * (dt / 2.0)
+        vel_mid1 = self._state_vector[3:6] + k1[3:6] * (dt / 2.0)
+
+        # Advance the environment to the midpoint using the baseline state copy
+        self._env._X = X_env_baseline.copy()
+        w_speed_mid1, w_rot_mid1 = self._env.update_turbulence(
+            dt / 2.0, h_meters=max(-pos_mid1[2], 0.1), V_mps=np.linalg.norm(vel_mid1 - wind_speed_0)
+        )
+        k2 = self._calculate_dynamics(self._state_vector + k1 * (dt / 2.0), w_speed_mid1, w_rot_mid1)
+
+        # --- STEP 3: Second Midpoint Pass (t = +dt/2) ---
+        pos_mid2 = self._state_vector[0:3] + k2[0:3] * (dt / 2.0)
+        vel_mid2 = self._state_vector[3:6] + k2[3:6] * (dt / 2.0)
+
+        # RESET the environment back to baseline before running the k3 midpoint update pass!
+        self._env._X = X_env_baseline.copy()
+        w_speed_mid2, w_rot_mid2 = self._env.update_turbulence(
+            dt / 2.0, h_meters=max(-pos_mid2[2], 0.1), V_mps=np.linalg.norm(vel_mid2 - w_speed_mid1)
+        )
+        k3 = self._calculate_dynamics(self._state_vector + k2 * (dt / 2.0), w_speed_mid2, w_rot_mid2)
+
+        # --- STEP 4: Final Boundary Pass (t = +dt) ---
+        pos_end = self._state_vector[0:3] + k3[0:3] * dt
+        vel_end = self._state_vector[3:6] + k3[3:6] * dt
+
+        # RESET the environment back to baseline before computing the final k4 boundary step pass!
+        self._env._X = X_env_baseline.copy()
+        w_speed_end, w_rot_end = self._env.update_turbulence(
+            dt, h_meters=max(-pos_end[2], 0.1), V_mps=np.linalg.norm(vel_end - w_speed_mid2)
+        )
+        k4 = self._calculate_dynamics(self._state_vector + k3 * dt, w_speed_end, w_rot_end)
+
+        # --- STEP 5: Rigid Body Final Update ---
+        self._state_vector += (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+        # --- STEP 6: Commit Final Environment Progression ---
+        # Now that the vehicle step is finished, permanently commit the step-forward filter memory
+        # to the instance so the next loop frame starts from the correct progression state.
+        self._env._X = X_env_baseline.copy()
+        # Finalize the true persistent step-forward calculation
+        self._env.update_turbulence(dt, h_meters=max(-self._state_vector[2], 0.1), V_mps=np.linalg.norm(self._state_vector[3:6] - w_speed_end))
+
     def get_state_vector(self):
         return self._state_vector
 
-    def set_state_vector(self, x):
-        self._state_vector = np.asarray(x, dtype=float).copy()
-
     def set_control_vector(self, control_vector):
-        cv = np.asarray(control_vector, dtype=float)
-        if cv.shape != (10,):
-            raise ValueError(
-                f"Interceptor control vector must have 10 elements "
-                f"{self.INPUT_NAMES}, got shape {cv.shape}")
-        self._control_vector = cv
-
-    def state_update(self, dt):
-        """Fixed-step RK4 integration of x_dot = f(x, u), Doc4 Sec 14.5."""
-        x = self._state_vector
-        u_in = self._control_vector
-        k1 = self._dynamics(x, u_in)
-        k2 = self._dynamics(x + 0.5 * dt * k1, u_in)
-        k3 = self._dynamics(x + 0.5 * dt * k2, u_in)
-        k4 = self._dynamics(x + dt * k3, u_in)
-        x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        x_next[6] = _wrap_pi(x_next[6])   # phi
-        x_next[8] = _wrap_pi(x_next[8])   # psi
-        self._state_vector = x_next
-
-    def _dynamics(self, x, u_in):
-        """Thin wrapper used by the RK4 integrator -- just the state
-        derivative, no report overhead on the hot path."""
-        xdot, _ = self._compute(x, u_in)
-        return xdot
-
-    # ---- core physics: x_dot = f(x, u), plus every intermediate ------------
-    def _compute(self, x, u_in):
-        """
-        Single source of truth for the force/moment build-up. Returns
-        (xdot, report) so the RK4 integrator and get_submission_report()
-        can never drift apart -- both read from exactly this computation,
-        never a second copy of the physics.
-        """
-        p = self.p
-        xe, ye, h, u, v, w, phi, theta, psi, p_rate, q_rate, r_rate = x
-
-        delta1, delta2 = u_in[0], u_in[1]
-        lam = u_in[2:6]
-        n = u_in[6:10]
-
-        # 1. Rotors --------------------------------------------------------
-        rot = rotors.rotor_forces_moments(n, lam, p, u=u, v=v, w=w)
-        Tf = rotors.front_pair_thrust(rot["T"])
-        Mgyro = rotors.gyroscopic_moment(
-            np.array([p_rate, q_rate, r_rate]), n, lam, p)
-
-        # 2. Airdata + downwash coupling ------------------------------------
-        Va, alpha, beta, qbar = lifting_body.airdata(u, v, w, p.rho)
-        eps, qbar_wing = lifting_body.downwash(Tf, Va, qbar, p)
-        alpha_wing = alpha - eps
-
-        # 3. Elevon input split + stall interlock ----------------------------
-        delta_e, delta_a = elevons.split(delta1, delta2)
-        delta_e = elevons.apply_stall_constraint(delta_e, alpha_wing, p)
-
-        # 4. Clean wing aerodynamics (elevon-free, see lifting_body.py) -------
-        CL, CD, Cm, Cl, Cn = lifting_body.aero_coefficients(
-            alpha_wing, p_rate, q_rate, r_rate, beta, Va, p)
-        Lclean, D, Y, Mx_aero, My_aero, Mz_aero = lifting_body.clean_forces_moments(
-            CL, CD, Cl, Cn, qbar_wing, q_rate, Va, beta, p)
-        Fx_aero, Fy_aero, Fz_aero = lifting_body.project_to_body(
-            Lclean, D, Y, alpha_wing, beta)
-
-        # 5. Elevon forces/moments (added exactly once) -----------------------
-        ev = elevons.elevon_forces_moments(delta_e, delta_a, alpha_wing, qbar_wing, p)
-
-        # 6. Gravity ----------------------------------------------------------
-        Fg = gravity.gravity_forces(phi, theta, p.mass, p.g)
-
-        # 7. Sum forces and moments --------------------------------------------
-        SFx = Fg[0] + Fx_aero + ev["Fx"] + np.sum(rot["FTx"])
-        SFy = Fg[1] + Fy_aero + ev["Fy"]
-        SFz = Fg[2] + Fz_aero + ev["Fz"] + np.sum(rot["FTz"])
-
-        SMx = Mx_aero + ev["Mx"] + np.sum(rot["MTx"] + rot["MQx"]) + Mgyro[0]
-        SMy = My_aero + ev["My"] + np.sum(rot["MTy"]) + Mgyro[1]
-        SMz = Mz_aero + ev["Mz"] + np.sum(rot["MTz"] + rot["MQz"]) + Mgyro[2]
-
-        # 8. State derivatives (Doc4 Sec 13.5) -----------------------------------
-        sphi, cphi = np.sin(phi), np.cos(phi)
-        stheta, ctheta = np.sin(theta), np.cos(theta)
-        spsi, cpsi = np.sin(psi), np.cos(psi)
-        ctheta_safe = ctheta if abs(ctheta) > 1e-6 else np.sign(ctheta or 1.0) * 1e-6
-
-        xdot = np.empty(12)
-
-        # navigation (no inputs)
-        xdot[0] = (u * ctheta * cpsi
-                   + v * (sphi * stheta * cpsi - cphi * spsi)
-                   + w * (cphi * stheta * cpsi + sphi * spsi))
-        xdot[1] = (u * ctheta * spsi
-                   + v * (sphi * stheta * spsi + cphi * cpsi)
-                   + w * (cphi * stheta * spsi - sphi * cpsi))
-        xdot[2] = u * stheta - v * sphi * ctheta - w * cphi * ctheta
-
-        # translational dynamics
-        xdot[3] = SFx / p.mass - q_rate * w + r_rate * v
-        xdot[4] = SFy / p.mass - r_rate * u + p_rate * w
-        xdot[5] = SFz / p.mass - p_rate * v + q_rate * u
-
-        # attitude kinematics (no inputs) -- singularity guarded at |theta|=90deg
-        xdot[6] = p_rate + (q_rate * sphi + r_rate * cphi) * (stheta / ctheta_safe)
-        xdot[7] = q_rate * cphi - r_rate * sphi
-        xdot[8] = (q_rate * sphi + r_rate * cphi) / ctheta_safe
-
-        # rotational dynamics, Ixz != 0 coupled
-        Ixx, Iyy, Izz, Ixz = p.Ixx, p.Iyy, p.Izz, p.Ixz
-        Gamma = Ixx * Izz - Ixz ** 2
-        xdot[9] = (Ixz * (Ixx - Iyy + Izz) * p_rate * q_rate
-                   + (Iyy * Izz - Izz ** 2 - Ixz ** 2) * q_rate * r_rate
-                   + Izz * SMx + Ixz * SMz) / Gamma
-        xdot[10] = ((Izz - Ixx) * p_rate * r_rate
-                    + Ixz * (r_rate ** 2 - p_rate ** 2)
-                    + SMy) / Iyy
-        xdot[11] = ((Ixz ** 2 + Ixx ** 2 - Ixx * Iyy) * p_rate * q_rate
-                    + Ixz * (Iyy - Ixx - Izz) * q_rate * r_rate
-                    + Ixz * SMx + Ixx * SMz) / Gamma
-
-        report = {
-            "SFx": SFx, "SFy": SFy, "SFz": SFz,
-            "SMx": SMx, "SMy": SMy, "SMz": SMz,
-            "rotor_T": rot["T"], "rotor_Q": rot["Q"],
-            "rotor_J": rot["J"], "rotor_CT": rot["CT"], "rotor_CQ": rot["CQ"],
-            "Tf_front_pair": Tf,
-            "Mgyro": Mgyro,
-            "Lclean": Lclean, "D": D, "Y": Y,
-            "Mx_aero": Mx_aero, "My_aero": My_aero, "Mz_aero": Mz_aero,
-            "elevon": ev,
-            "Va": Va, "alpha": alpha, "alpha_wing": alpha_wing,
-            "beta": beta, "qbar": qbar, "qbar_wing": qbar_wing,
-            "delta_e": delta_e, "delta_a": delta_a,
-        }
-        return xdot, report
-
-    # ---- submission-format report -------------------------------------------
-    def get_submission_report(self):
-        """
-        The F, M, and per-rotor torque summary for reporting/documentation
-        -- re-runs the exact same computation state_update() uses (via
-        _compute), so this can never disagree with the simulated dynamics.
-
-        Returns a dict:
-          forces  : {Fx, Fy, Fz}         body-axis, N, Sigma F (includes gravity)
-          moments : {Mx, My, Mz}         body-axis, N m, Sigma M (includes gyroscopic)
-          rotor_torques : {Q1..Q4}       N m, reaction torque per rotor (Doc4 Sec 10.5)
-          rotor_thrusts : {T1..T4}       N, thrust per rotor
-        """
-        xdot, r = self._compute(self._state_vector, self._control_vector)
-        return {
-            "forces": {"Fx": r["SFx"], "Fy": r["SFy"], "Fz": r["SFz"]},
-            "moments": {"Mx": r["SMx"], "My": r["SMy"], "Mz": r["SMz"]},
-            "rotor_thrusts": {f"T{i+1}": r["rotor_T"][i] for i in range(4)},
-            "rotor_torques": {f"Q{i+1}": r["rotor_Q"][i] for i in range(4)},
-            "rotor_advance_ratio": {f"J{i+1}": r["rotor_J"][i] for i in range(4)},
-        }
-
-    def get_force_moment_breakdown(self):
-        """Full intermediate breakdown (all terms, not just totals) for
-        debugging / reproducing the FINAL_CASES ledger checks."""
-        _, report = self._compute(self._state_vector, self._control_vector)
-        return report
-
-
-def _wrap_pi(angle):
-    return (angle + np.pi) % (2 * np.pi) - np.pi
+        self._control_vector = control_vector
