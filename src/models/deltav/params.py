@@ -1,35 +1,21 @@
 """
 Central parameter set for the winged quad-tiltrotor interceptor.
 
-Consolidated from:
-  - 6DOF.pdf                               (Secs 2, 3, 5)
-  - Full_6DOF_RigidBody_Derivation.pdf     (Ch 13, Appendix C)
-  - FINAL_CASES_WITH_PITCH_TRIM.pdf        (Sec 1, 2, 4)
-
-Every field below is commented with its source. Where the source
-documents only give a qualitative "typical" value or leave a
-coefficient blank (Appendix C.3 marks several with "--"), the field is
-tagged NEEDS_MEASUREMENT. These are placeholders sized to be physically
-plausible (so the simulator runs and hovers), NOT validated numbers.
-For a publication-grade result, every NEEDS_MEASUREMENT field must be
-replaced with real CFD / BEMT / wind-tunnel / motor-bench data.
-
---------------------------------------------------------------------
-KNOWN CROSS-DOCUMENT INCONSISTENCY -- chord length
---------------------------------------------------------------------
-6DOF.pdf's vehicle table lists "chord = 0.40 m", while
-FINAL_CASES_WITH_PITCH_TRIM.pdf's config table gives "mean chord
-c_bar = 0.291 m" directly, and S/b = 0.156/0.60 = 0.26 m is a third,
-different number. We use c_bar = 0.291 m here because it is the only
-one of the three that reproduces FINAL_CASES' own arithmetic checks
-exactly (q*S*c_bar = 1531*0.156*0.291 = 69.6 N*m, matching Sec 1
-verbatim). 0.40 m is most likely a root/plan chord rather than the
-mean aerodynamic chord used in the coefficient normalisation. Resolve
-this against your actual planform before publication.
 """
 from dataclasses import dataclass, field
 import json
+import os
 import numpy as np
+
+
+def _default_polar_table_path():
+    """Absolute path to the real XFLR5 fuselage+wing polar. Computed from
+    this file's own location (not a relative string) so it resolves the
+    same way regardless of which directory a script is launched from --
+    deltav scripts are normally run from src/models/, three levels above
+    the project root where config/ lives."""
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    return os.path.join(project_root, "config", "aero", "wing_polar_xflr5.txt")
 
 
 @dataclass
@@ -90,26 +76,25 @@ class InterceptorParams:
     Ixz: float = 0.003                      # kg m^2   NEEDS_MEASUREMENT
 
     # ---- lift / drag / moment coefficients ---------------------------------
-    CL0: float = 0.0                        # symmetric section (Doc4 Sec 8.2)
-    CL_alpha: float = 5.0                   # /rad, "typical" at AR=2.3 (Doc4 Sec 8.2)  NEEDS_MEASUREMENT
+    CL0: float = 0.0                        # symmetric section 
+    CL_alpha: float = 5.0                   # /rad, "typical" at AR=2.3   NEEDS_MEASUREMENT
     CL_q: float = 3.0                       # /rad, Appendix C.3 "typical"              NEEDS_MEASUREMENT
-    CDp: float = 0.02                       # parasite drag, Appendix C.3 "typical"     NEEDS_MEASUREMENT
-    oswald_e: float = 0.8                   # Appendix C.3 "typical"                    NEEDS_MEASUREMENT
+    CDp: float = 0.02                       # parasite drag "typical"     NEEDS_MEASUREMENT
+    oswald_e: float = 0.8                   #  "typical"                    NEEDS_MEASUREMENT
 
-    Cm0: float = 0.0                        # Appendix C.3 "~0"
+    Cm0: float = 0.0                        #  "~0"
     Cm_alpha: float = None                  # computed in __post_init__ from the static-margin
                                              # identity Cm_alpha = -CL_alpha*(xnp-xcg)/c_bar
-                                             # (Full_6DOF Sec 9.2) unless overridden explicitly
-    Cm_q: float = -10.0                     # /rad, Appendix C.3 "typical"               NEEDS_MEASUREMENT
+                                             # unless overridden explicitly
+    Cm_q: float = -10.0                     # /rad,             NEEDS_MEASUREMENT
 
     # NEEDS_MEASUREMENT: lateral-directional derivatives are explicitly
-    # left blank ("--") or only qualitatively described ("small",
-    # "weak without a tail") in Appendix C.3 / Full_6DOF Sec 9.3.
+    # left blank ("--") or only qualitatively described ("small","weak without a tail") 
     CY_beta: float = -0.10                  # /rad   NEEDS_MEASUREMENT
     Cl_beta: float = -0.05                  # /rad   NEEDS_MEASUREMENT
     Cl_p: float = -0.40                     # /rad   NEEDS_MEASUREMENT
-    Cn_beta: float = 0.02                   # /rad, small & weakly stabilising (Sec 9.3)  NEEDS_MEASUREMENT
-    Cn_r: float = -0.05                     # /rad, weak, no tail (Sec 9.3)               NEEDS_MEASUREMENT
+    Cn_beta: float = 0.02                   # /rad, small & weakly stabilising   NEEDS_MEASUREMENT
+    Cn_r: float = -0.05                     # /rad, weak, no tail                NEEDS_MEASUREMENT
 
     alpha_stall: float = np.radians(13.0)   # FINAL_CASES Sec 1 -- the AoA CAP the vehicle
                                              # is operated within (Cases 1-6); kept separate
@@ -130,7 +115,11 @@ class InterceptorParams:
     # -23 to +24 deg, but hover's downwash-corrected alpha_wing routinely
     # reaches 80-90 deg, so the blend-to-flat-plate fallback is mandatory,
     # not optional, or the simulator has no defined aero data out there.
-    polar_table_path: str = None            # e.g. "config/aero/wing_polar_xflr5.csv"
+    polar_table_path: str = field(default_factory=_default_polar_table_path)
+                                             # real fuselage+wing XFLR5 sweep (50 m/s,
+                                             # -23.25 to 24 deg), config/aero/wing_polar_xflr5.txt.
+                                             # Set to None to force the pure parametric
+                                             # stall-blend model everywhere instead.
     polar_blend_deg: float = 5.0            # width of the cosine taper straddling each
                                              # edge of the table's alpha range, blending
                                              # table values -> flat-plate values. Not a
@@ -146,35 +135,60 @@ class InterceptorParams:
     delta_max: float = np.radians(25.0)     # mechanical travel limit
 
     # ---- rotor / propulsion -------------------------------------------------
-    # NEEDS_MEASUREMENT: CT, CQ, rotor diameter D and polar inertia Ip
-    # are all "--" (no numeric value) in Appendix C.3. Placeholders below
-    # are only sized so 4 rotors can roughly hover 3 kg near a plausible
-    # rev/s for an 8-inch prop -- replace with real motor/prop bench data.
-    rotor_diameter: float = 0.2032          # m (8 in)                      NEEDS_MEASUREMENT
+    # Real APC 10x7 propeller bench data (PER3_10x7.txt, RPM=10000 row --
+    # picked because it's fully populated across the whole J range and mid-
+    # range enough not to be a Reynolds-number outlier; the different RPM
+    # sweeps in that file agree with each other to a few percent, so any one
+    # of them would do). Rotor diameter MUST match the prop this table came
+    # from -- CT/CQ are only meaningful nondimensionalized by the same D
+    # they were measured with. 10 in = 0.254 m, not the old 8 in placeholder.
+    rotor_diameter: float = 0.254           # m (10 in, APC 10x7)
 
-    # CT(J), CQ(J) as interpolated tables over advance ratio J = V_N/(nD),
-    # replacing the earlier fixed CT/CQ constants (Selig 2014, Sec IV.D,
-    # Eqs. 23-25: thrust/torque coefficients come from lookup tables on
-    # advance ratio, not fixed values -- a fixed CT/CQ is only valid at
-    # the single flight condition it was tuned for). CT(0)/CQ(0) below
-    # match the old constants exactly so hover trim (Case 1) is
-    # unaffected; the decline with J is a generic RC-prop shape (CT
-    # falls faster than CQ, both roughly -> 0 near J~1.1-1.2) and MUST
-    # be replaced with real manufacturer or BEMT (PROPID-style) data --
-    # this shape only exists so the model is qualitatively right, not
-    # quantitatively validated.                                          NEEDS_MEASUREMENT
-    CT_table_J:  tuple = (0.0,  0.2,  0.4,   0.6,   0.8,  1.0,   1.2)
-    CT_table_val: tuple = (0.11, 0.10, 0.085, 0.065, 0.04, 0.015, 0.0)
-    CQ_table_J:  tuple = (0.0,   0.2,   0.4,   0.6,   0.8,   1.0,  1.2)
-    CQ_table_val: tuple = (0.010, 0.0098, 0.0093, 0.0085, 0.0074, 0.006, 0.0045)
+    # CT(J), CQ(J) as interpolated tables over advance ratio J = V_N/(nD).
+    # CQ here is derived from the file's power coefficient via the standard
+    # propeller identity Cq = Cp / (2*pi), since P = Q * omega = Q*2*pi*n
+    # implies Cp*rho*n^3*D^5 = Cq*2*pi*rho*n^3*D^5. Ip below is still a
+    # placeholder -- the bench file gives no polar-inertia figure.
+    CT_table_J:  tuple = (0.0000, 0.0303, 0.0606, 0.0908, 0.1211, 0.1514, 0.1817, 0.2119, 0.2422, 0.2725,
+                          0.3028, 0.3331, 0.3633, 0.3936, 0.4239, 0.4542, 0.4844, 0.5147, 0.5450, 0.5753,
+                          0.6056, 0.6358, 0.6661, 0.6964, 0.7267, 0.7570, 0.7872, 0.8175, 0.8478, 0.8781)
+    CT_table_val: tuple = (0.1250, 0.1236, 0.1220, 0.1203, 0.1184, 0.1163, 0.1139, 0.1114, 0.1086, 0.1055,
+                           0.1022, 0.0986, 0.0947, 0.0905, 0.0860, 0.0812, 0.0762, 0.0709, 0.0655, 0.0600,
+                           0.0543, 0.0485, 0.0426, 0.0366, 0.0305, 0.0244, 0.0183, 0.0122, 0.0061, 0.0000)
+    CQ_table_J:  tuple = CT_table_J
+    CQ_table_val: tuple = (0.00824, 0.00840, 0.00856, 0.00871, 0.00885, 0.00898, 0.00909, 0.00918, 0.00925, 0.00929,
+                           0.00931, 0.00928, 0.00922, 0.00910, 0.00894, 0.00874, 0.00850, 0.00820, 0.00785, 0.00745,
+                           0.00702, 0.00654, 0.00602, 0.00546, 0.00484, 0.00420, 0.00352, 0.00279, 0.00204, 0.00124)
     n_reg: float = 5.0                      # rev/s floor for the J = V_N/(nD)
                                              # denominator -- same regularization
                                              # pattern as Va_reg, prevents J from
                                              # diverging at low commanded rpm.
                                              # NEEDS_MEASUREMENT / ENGINEERING CHOICE
     Ip: float = 2.0e-5                      # kg m^2, rotor polar inertia    NEEDS_MEASUREMENT
-    k_eps: float = 0.75                     # downwash angle factor, range 0.5-1.0 (Doc4 Sec 12.2)  NEEDS_TUNING
+    k_eps: float = 0.75                     # downwash angle factor, range 0.5-1.0   NEEDS_TUNING
     k_q: float = 0.75                       # dyn. pressure augmentation, range 0.5-1.0             NEEDS_TUNING
+
+    # ---- oblique-flow (tilted-disc) correction -----------------------------
+    # Normal-force / P-factor terms (Rotor_Block_Oblique_Flow_Extension.pdf
+    # Sec 7) that the axial CT(J)/CQ(J) table cannot see -- only triggered by
+    # disc incidence alpha_i != 0 (in-plane flow at the hub), not by tilt
+    # angle alone (Sec 5). Needs blade planform, not just the integrated
+    # CT/CQ the PER3 file provides:
+    blade_Nb: int = 2                       # blade count, APC-class 10x7   ASSUMED (standard 2-blade)
+    blade_chord: float = 0.020              # m, representative mean chord (Sec 7.1)   NEEDS_MEASUREMENT
+                                             # -- real value needs the APC .PEO geometry
+                                             # file or digitized blade planform.
+    blade_Cd: float = 0.02                  # mean blade section profile drag (Sec 7.2)  NEEDS_MEASUREMENT
+                                             # -- representative for a thin low-Re section;
+                                             # enters as a small additive term, not dominant.
+    J_reg: float = 0.05                     # floor on |J| used ONLY inside the oblique
+                                             # correction's pi/J singular terms (Sec 7.5:
+                                             # "Eqs. 4-5 blow up as Ji -> 0 ... cannot be
+                                             # reliably applied near hover"). Does NOT touch
+                                             # the baseline CT/CQ table lookup (advance_ratio()
+                                             # has its own n_reg floor for that). Same
+                                             # regularization pattern as n_reg/Va_reg.
+                                             # NEEDS_TUNING / ENGINEERING CHOICE
 
     # NOT specified anywhere in the source documents. The rate-damping
     # terms (CLq*c_bar/(2Va)*q, Cmq*c_bar/(2Va)*q, Clp*b/(2Va)*p,
@@ -205,6 +219,8 @@ class InterceptorParams:
             self.Cm_alpha = -self.CL_alpha * (self.xnp - self.xcg) / self.c_bar
 
         self.rotor_disk_area = np.pi * (self.rotor_diameter / 2.0) ** 2
+        R = self.rotor_diameter / 2.0
+        self.blade_solidity = self.blade_Nb * self.blade_chord / (np.pi * R)   # sigma, Sec 7.1
 
         # Rotor layout (H-frame, confirmed CAD geometry -- 6DOF.pdf Sec 2.1's
         # rotor-index/spin convention, with the ACTUAL per-crossbar spans):

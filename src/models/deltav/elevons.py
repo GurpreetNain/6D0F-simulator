@@ -3,7 +3,7 @@ import numpy as np # Import the numpy library for math operations
 
 def split(delta1, delta2):
     """delta_e (pitch, symmetric), delta_a (roll, differential).
-    6DOF.pdf Sec 5.2 / Doc4 Sec 11.4."""
+    """
     delta_e = 0.5 * (delta1 + delta2) # direct input delta1, delta 2 - pitch
     delta_a = 0.5 * (delta2 - delta1) # direct input delta1, delta 2 - roll
     return delta_e, delta_a           # Return the calculated pitch and roll inputs
@@ -23,8 +23,7 @@ def apply_stall_constraint(delta_e, alpha_wing, params):
     would push the near-stall aft wing past separation.
     Doc4 Sec 11.6; FINAL_CASES Sec 2 ("Stall constraint").
     Hard operating limit enforced here, not part of the continuous
-    dynamics -- mirrors how it is used in the trim cases (Sec 3:
-    "Wing at cap: delta_e = 0").
+    dynamics -- mirrors how it is used in the trim cases ("Wing at cap: delta_e = 0").
     """
     if alpha_wing >= params.alpha_stall:    # Check if the wing's angle of attack has reached or exceeded the stall limit
         return max(delta_e, 0.0)            # If stalling, prevent trailing-edge down (negative) elevon which worsens separation; clamp to 0 or positive
@@ -35,7 +34,7 @@ def elevon_forces_moments(delta_e, delta_a, alpha_wing, qbar_wing, params):
     """
     Elevon force (in the slipstream-corrected qbar_wing, alpha_wing) and
     moment, added exactly once to the vehicle's Sigma_F / Sigma_M.
-    Doc4 Sec 11.3, 11.4, 11.7; 6DOF.pdf Sec 6.2, 7.2.
+    
 
         Delta_L   = -CL_delta_e * eta(delta_e) * delta_e * qbar_wing * S
         Delta_De  =  qbar_wing * S * k_e * (eta(delta_e)*delta_e)^2

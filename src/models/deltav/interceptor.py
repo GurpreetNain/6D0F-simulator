@@ -95,14 +95,16 @@ class Interceptor:
         n = u_in[6:10]
 
         # 1. Rotors --------------------------------------------------------
-        rot = rotors.rotor_forces_moments(n, lam, p, u=u, v=v, w=w)
+        rot = rotors.rotor_forces_moments(n, lam, p, u=u, v=v, w=w,
+                                           p=p_rate, q=q_rate, r=r_rate)
         Tf = rotors.front_pair_thrust(rot["T"])
+        lam_f = lam[0]   # front pair (rotors 1, 3) share one tilt actuator
         Mgyro = rotors.gyroscopic_moment(
             np.array([p_rate, q_rate, r_rate]), n, lam, p)
 
         # 2. Airdata + downwash coupling ------------------------------------
-        Va, alpha, beta, qbar = lifting_body.airdata(u, v, w, p.rho)
-        eps, qbar_wing = lifting_body.downwash(Tf, Va, qbar, p)
+        Va, alpha, beta, qbar = lifting_body.airdata(u, v, w, p)
+        eps, qbar_wing = lifting_body.downwash(Tf, lam_f, Va, qbar, p)
         alpha_wing = alpha - eps
 
         # 3. Elevon input split + stall interlock ----------------------------
@@ -124,13 +126,17 @@ class Interceptor:
         Fg = gravity.gravity_forces(phi, theta, p.mass, p.g)
 
         # 7. Sum forces and moments --------------------------------------------
-        SFx = Fg[0] + Fx_aero + ev["Fx"] + np.sum(rot["FTx"])
-        SFy = Fg[1] + Fy_aero + ev["Fy"]
-        SFz = Fg[2] + Fz_aero + ev["Fz"] + np.sum(rot["FTz"])
+        # Oblique-flow normal-force / P-factor terms (FNx/y/z, MNx/y/z) are
+        # zero whenever every rotor sees purely axial flow (trimmed hover or
+        # cruise) and only engage during transition, sideslip, or body rate
+        # -- see rotors.py's oblique-flow correction block.
+        SFx = Fg[0] + Fx_aero + ev["Fx"] + np.sum(rot["FTx"] + rot["FNx"])
+        SFy = Fg[1] + Fy_aero + ev["Fy"] + np.sum(rot["FNy"])
+        SFz = Fg[2] + Fz_aero + ev["Fz"] + np.sum(rot["FTz"] + rot["FNz"])
 
-        SMx = Mx_aero + ev["Mx"] + np.sum(rot["MTx"] + rot["MQx"]) + Mgyro[0]
-        SMy = My_aero + ev["My"] + np.sum(rot["MTy"]) + Mgyro[1]
-        SMz = Mz_aero + ev["Mz"] + np.sum(rot["MTz"] + rot["MQz"]) + Mgyro[2]
+        SMx = Mx_aero + ev["Mx"] + np.sum(rot["MTx"] + rot["MQx"] + rot["MNx"]) + Mgyro[0]
+        SMy = My_aero + ev["My"] + np.sum(rot["MTy"] + rot["MNy"]) + Mgyro[1]
+        SMz = Mz_aero + ev["Mz"] + np.sum(rot["MTz"] + rot["MQz"] + rot["MNz"]) + Mgyro[2]
 
         # 8. State derivatives ---------------------------------------------------
         sphi, cphi = np.sin(phi), np.cos(phi)
@@ -178,6 +184,9 @@ class Interceptor:
             "SMx": SMx, "SMy": SMy, "SMz": SMz,
             "rotor_T": rot["T"], "rotor_Q": rot["Q"],
             "rotor_J": rot["J"], "rotor_CT": rot["CT"], "rotor_CQ": rot["CQ"],
+            "rotor_alpha_i": rot["alpha_i"], "rotor_mu_i": rot["mu_i"],
+            "rotor_FN": np.stack([rot["FNx"], rot["FNy"], rot["FNz"]], axis=-1),
+            "rotor_MN": np.stack([rot["MNx"], rot["MNy"], rot["MNz"]], axis=-1),
             "Tf_front_pair": Tf,
             "Mgyro": Mgyro,
             "Lclean": Lclean, "D": D, "Y": Y,

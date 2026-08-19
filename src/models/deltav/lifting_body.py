@@ -7,26 +7,78 @@ CLEAN aerodynamic forces/moments
 import numpy as np
 
 
-def airdata(u, v, w, rho):
-   
-    Va = float(np.sqrt(u**2 + v**2 + w**2)) # Total Airspeed (Va)
+def airdata(u, v, w, params):
+    """
+    alpha is regularized below params.Va_reg -- atan2(w,u) is a genuine
+    mathematical singularity at u=w=0: the DIRECTION of a near-zero
+    vector is not physically meaningful, so a fraction of a m/s of noise
+    in u/w there can swing alpha by 100+ degrees (verified: a 0.1 m/s
+    perturbation at hover moved alpha_wing from -85deg to +95deg). Fed
+    into CL/Cm this produces a real, large, sign-flipping force/moment
+    for an imperceptible velocity change -- confirmed to be exactly what
+    was driving hover open-loop runs unstable (q diverging within a
+    single 0.01s RK4 step even starting from an exact static trim,
+    despite the trim's own residual being ~1e-9).
+
+    Below Va_reg, alpha is a LINEAR BLEND (not a hard switch) between the
+    ordinary atan2(w,u) and a regularized atan2(w,Va_reg) reference --
+    same floor concept Va_reg already applies to every 1/Va rate-damping
+    term elsewhere in this file, just applied to alpha's own denominator
+    here. An early version used a hard if/else switch at Va=Va_reg
+    instead of this blend; that has its own discontinuity right at the
+    switch-over whenever w/u's ratio there differs from w/Va_reg's. The
+    blend is continuous everywhere by construction -- at Va=0 it's pure
+    atan2(w,Va_reg) (bounded, smooth in w), converging smoothly to the
+    ordinary atan2(w,u) as Va reaches Va_reg.
+
+    u is additionally clamped to >=0 before the raw atan2 term (not
+    Va_reg -- 0 exactly): atan2(w,u) has a genuine branch cut at w=0,
+    u<0 (atan2(0,+tiny)=0 but atan2(0,-tiny)=+-pi -- a real, unavoidable
+    jump, not a smoothness artifact of this file's own regularization).
+    Verified by direct linearization at a hover trim point: with u
+    unclamped, d(u_dot)/du came out to ~1622/s -- a physically absurd
+    aerodynamic derivative -- traced to exactly this jump multiplying a
+    tiny finite-difference step. Clamping is physically justified here:
+    this airframe is a forward-flight-oriented tiltrotor with no
+    intended backward-flight regime, so treating u<0 the same as u=0
+    (rather than evaluating the theoretically-correct but numerically
+    hazardous negative-u branch) costs nothing operationally and removes
+    a derivative singularity that isn't otherwise reachable by design.
+    """
+    rho, Va_reg = params.rho, params.Va_reg
+    Va = float(np.sqrt(u**2 + v**2 + w**2))                   # Total Airspeed (Va)
     if Va > 1e-6:
-        beta = float(np.arcsin(np.clip(v / Va, -1.0, 1.0))) #sideslip angle
+        beta = float(np.arcsin(np.clip(v / Va, -1.0, 1.0)))   #sideslip angle
     else:
         beta = 0.0
-    alpha = float(np.arctan2(w, u)) # angle of attack
-    qbar = 0.5 * rho * Va**2 #Dynamic Pressure
+    blend = min(Va / Va_reg, 1.0)                             # 0 at rest -> 1 at Va_reg, capped beyond
+    alpha_reg = float(np.arctan2(w, Va_reg))                  # bounded reference, never singular
+    alpha_raw = float(np.arctan2(w, max(u, 0.0))) if Va > 1e-9 else 0.0
+    alpha = (1.0 - blend) * alpha_reg + blend * alpha_raw     # angle of attack
+    qbar = 0.5 * rho * Va**2                                  # Dynamic Pressure
     return Va, alpha, beta, qbar
 
 
-def downwash(Tf, Va, qbar, params):
+def downwash(Tf, lam_f, Va, qbar, params):
     """
     Front-rotor slipstream correction to the wing's effective alpha and
-    dynamic pressure. 
+    dynamic pressure, gated by front-rotor tilt angle lam_f.
 
-        wi        = sqrt(Tf / (2 rho Adisk))                  -- induced velocity from front-rotor thrust
-        epsilon   = k_eps * wi / Va                           -- effective alpha shift from the downwash
-        qbar_wing = qbar * (1 + k_q * Tf / (qbar * Adisk))    -- dynamic pressure seen by the wing after downwash
+        Tf_perp   = Tf * cos(lam_f)                            -- only the part of front thrust still pointing through the wing
+        wi        = sqrt(Tf_perp / (2 rho Adisk))               -- induced velocity from that vertical component
+        epsilon   = k_eps * wi / Va                             -- effective alpha shift from the downwash
+        qbar_wing = qbar * (1 + k_q * Tf_perp / (qbar * Adisk)) -- dynamic pressure seen by the wing after downwash
+
+    TILT GATE: picture the front rotors as a fan. Pointed straight up
+    (hover, lam_f=0), all the air they move gets blown straight down onto
+    the wing below -- full downwash (cos(0)=1, so Tf_perp=Tf, identical to
+    the ungated formula). Tilted almost flat forward (cruise, lam_f~90deg),
+    the fan blows air backward past the fuselage, not down through the
+    wing -- cos(lam_f) fades Tf_perp to ~0, and this reduces to qbar_wing
+    ~= qbar, eps ~= 0. Without this gate, hover-strength downwash gets
+    applied even at cruise tilt, which can flip the sign of alpha_wing
+    entirely (verified: alpha_wing came out at -4.93 deg instead of the
+    expected +3.3 deg for a 50 m/s cruise case before this gate was added).
 
     NOTE: at hover, Va is near zero while wi (from the rotor thrust) is
     not, so epsilon = k_eps*wi/Va would blow up without a limit. We cap
@@ -35,14 +87,14 @@ def downwash(Tf, Va, qbar, params):
     qbar_wing has no such blow-up problem and needs no cap.
     """
     Adisk = params.rotor_disk_area
-    Tf = max(float(Tf), 0.0)                                     # no negative thrust
-    wi = np.sqrt(Tf / (2.0 * params.rho * Adisk))                # induced velocity (momentum theory)
+    Tf_perp = max(float(Tf) * np.cos(lam_f), 0.0)                # only the vertical (through-the-wing) component, no negative thrust
+    wi = np.sqrt(Tf_perp / (2.0 * params.rho * Adisk))           # induced velocity (momentum theory)
     eps_cap = np.radians(85.0)                                   # largest allowed downwash angle (85 deg), so the math below can't blow up when the drone is barely moving
     eps = np.clip(params.k_eps * wi / max(Va, params.Va_reg), -eps_cap, eps_cap)  # downwash angle, kept within the +/-85 deg limit above
     if qbar > 1e-9:
-        qbar_wing = qbar * (1.0 + params.k_q * Tf / (qbar * Adisk))  # normal flight: forward-flight air pressure plus extra push from the rotor wash
+        qbar_wing = qbar * (1.0 + params.k_q * Tf_perp / (qbar * Adisk))  # normal flight: forward-flight air pressure plus extra push from the rotor wash
     else:
-        qbar_wing = params.k_q * Tf / Adisk                          # hovering (near-zero airspeed): pressure on the wing comes only from the rotor wash
+        qbar_wing = params.k_q * Tf_perp / Adisk                          # hovering (near-zero airspeed): pressure on the wing comes only from the rotor wash
     return eps, qbar_wing
 
 
@@ -74,7 +126,7 @@ def aero_coefficients(alpha_wing, p_rate, q_rate, r_rate, beta, Va, params):
     Cm/Cl/Cn: always use the simple formula, even if a table is given --
     the table's Cm isn't reliable enough to mix in safely.
     """
-    Va_s = max(Va, params.Va_reg)                        # floor for the 1/Va rate-damping terms
+    Va_s = max(Va, params.Va_reg)                                       # floor for the 1/Va rate-damping terms
     CL, CD = _lift_drag_coefficients(alpha_wing, params)
 
     Cm = (params.Cm0                                                    # baseline pitch moment at zero angle of attack

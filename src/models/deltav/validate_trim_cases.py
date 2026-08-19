@@ -14,6 +14,8 @@ import numpy as np
 
 from deltav.params import InterceptorParams
 from deltav import rotors, lifting_body, elevons, gravity
+from deltav.interceptor import Interceptor
+from deltav.trim import case3_head_on_trim
 
 
 def case1_hover():
@@ -68,36 +70,36 @@ def case3_head_on():
     print("=" * 70)
     p = InterceptorParams()
 
-    # Paper's numbers for this case (Sec 5, Case 3):
-    gamma = np.radians(4.574)
+    # Paper's numbers for this case (Sec 5, Case 3), for comparison only:
     delta_e = np.radians(6.5)
     alpha = np.radians(3.3)
     Lclean_paper = 36.0
     dLe_paper = -6.7
 
-    Va = 50.0
-    qbar = 0.5 * p.rho * Va ** 2
-    # No rotor slipstream in cruise (Tf ~ 0, high Va) -> qbar_wing ~ qbar
-    eps, qbar_wing = lifting_body.downwash(0.0, Va, qbar, p)
-    alpha_wing = alpha - eps
+    # Build the SAME trim point fly_case3.py flies (deltav.trim), and read
+    # the numbers straight out of Interceptor._compute() -- this runs the
+    # real front-pair thrust and tilt angle through the actual downwash
+    # gate, rather than manually zeroing Tf the way this check used to.
+    # (That manual zeroing was exactly why this static check never caught
+    # the missing tilt gate that fly_case3.py's dynamic run did.)
+    x0, u_in = case3_head_on_trim(p)
+    vehicle = Interceptor(params=p)
+    _, report = vehicle._compute(x0, u_in)
 
-    CL, CD, Cm, Cl, Cn = lifting_body.aero_coefficients(
-        alpha_wing, 0.0, 0.0, 0.0, 0.0, Va, p)
-    Lclean, D, Y, Mx_aero, My_aero, Mz_aero = lifting_body.clean_forces_moments(
-        CL, CD, Cl, Cn, qbar_wing, 0.0, Va, 0.0, p)
-
-    ev = elevons.elevon_forces_moments(delta_e, 0.0, alpha_wing, qbar_wing, p)
+    alpha_wing = report["alpha_wing"]
+    Lclean = report["Lclean"]
+    dLe = report["elevon"]["delta_L"]
 
     print(f"alpha_wing = {np.degrees(alpha_wing):.2f} deg (paper alpha: {np.degrees(alpha):.1f} deg)")
     print(f"Lclean     = {Lclean:.1f} N        (paper: {Lclean_paper} N)")
-    print(f"Delta_L    = {ev['delta_L']:.1f} N        (paper Delta_Le: {dLe_paper} N)")
+    print(f"Delta_L    = {dLe:.1f} N        (paper Delta_Le: {dLe_paper} N)")
 
     # Paper's moment ledger (Sec 5, Case 3): -0.013*Lclean_paper + 4.14*delta_e[rad] == 0
     ledger_paper = -0.013 * Lclean_paper + 4.14 * delta_e
     print(f"\nPaper's own ledger check: -0.013*Lclean + 4.14*delta_e = {ledger_paper:+.4f} (paper claims ~0)")
 
     # Our single-count moment: My_aero (clean, NP-lever term only) + My_delta
-    SMy = My_aero + ev["My"]
+    SMy = report["My_aero"] + report["elevon"]["My"]
     print(f"Our Sigma_My = My_aero + My_delta = {SMy:+.4f} N m (expect ~0 at trim)")
     ok = abs(SMy) < 0.5   # loose tolerance: our CL_alpha/Cm_q etc are NEEDS_MEASUREMENT placeholders
     print(f"  -> {'PASS (within placeholder-coefficient tolerance)' if ok else 'FAIL'}")
